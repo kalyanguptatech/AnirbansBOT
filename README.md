@@ -1,4 +1,4 @@
-# 🤖 Whop AI Bot
+# 🤖 Whop AI Bot bot
 
 **A production-ready AI support bot for Whop communities with intelligent response optimization and cost-efficient token usage.**
 
