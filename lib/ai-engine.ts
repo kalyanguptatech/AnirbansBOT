@@ -1,121 +1,77 @@
 /**
  * AI Engine - Intelligent Question Processing and Response Generation
  * 
- * This module provides the core AI functionality for the Whop support bot.
- * It intelligently processes user messages, determines if they need responses,
- * and generates fresh contextual answers using OpenRouter AI models.
- * 
- * Key Features:
- * - Smart question detection with efficient processing
- * - Preset Q&A matching for instant responses
- * - Contextual AI responses using company knowledge base
- * - Rate limiting to prevent API quota exhaustion
- * - Multiple response styles (professional, friendly, casual, technical)
- * - Automatic fallback handling for API failures
- * - Fresh responses for maximum accuracy
- * 
- * Question Processing Pipeline:
- * 1. Quick heuristic check for question indicators
- * 2. Preset Q&A matching for common questions
- * 3. AI-powered question confirmation
- * 4. Context-aware response generation
- * 5. Rate limit tracking
- * 
- * Performance Optimizations:
- * - Rate limiting (10 AI requests per minute per company)
- * - Efficient question detection to avoid unnecessary AI calls
- * - Fresh responses generated every time for accuracy
- * - Automatic memory management
- * 
- * Usage:
- * ```typescript
- * const response = await aiEngine.analyzeQuestion(message, settings);
- * if (response) {
- *   // Send response to user
- * }
- * ```
+ * This module provides the core AI functionality for the Whop support bot
+ * using Google's Gemini API directly.
  */
 
-import OpenAI from 'openai';
-import { BotSettings, config, logger, retry, isQuestion, extractKeyPhrases, sanitizeText, truncateText } from './shared-utils';
+import { GoogleGenAI } from "@google/genai";
+import { BotSettings, config, logger, retry, isQuestion, sanitizeText, truncateText } from './shared-utils';
 
 // =============================================================================
 // AI PROMPTS
 // =============================================================================
 
-export function createSystemPrompt(knowledgeBase: string, settings: BotSettings, shouldForceResponse: boolean = false): string {
+export function createSystemPrompt(
+  knowledgeBase: string, 
+  settings: BotSettings, 
+  shouldForceResponse: boolean = false
+): string {
   let systemPrompt = '';
 
-  // Base personality - keep it simple
   switch (settings.responseStyle) {
     case 'professional':
-      systemPrompt = 'You are a helpful AI assistant for this community. Be professional and clear.';
+      systemPrompt = 'You are a professional AI assistant. Be clear and respectful.';
       break;
     case 'friendly':
-      systemPrompt = 'You are a friendly AI assistant for this community. Be warm and helpful.';
+      systemPrompt = 'You are a friendly AI assistant. Be warm, approachable, and kind.';
       break;
     case 'casual':
-      systemPrompt = 'You are a casual AI assistant for this community. Be relaxed and friendly.';
+      systemPrompt = 'You are a casual AI assistant. Be relaxed, witty, and natural.';
       break;
     case 'technical':
-      systemPrompt = 'You are a technical AI assistant for this community. Be precise and detailed.';
+      systemPrompt = 'You are a technical AI assistant. Be precise and detailed.';
       break;
     case 'custom':
-      systemPrompt = settings.botPersonality || 'You are a helpful AI assistant for this community.';
+      systemPrompt = settings.botPersonality || 'You are a helpful AI assistant.';
       break;
     default:
-      systemPrompt = 'You are a helpful AI assistant for this community.';
+      systemPrompt = 'You are a helpful AI assistant.';
   }
 
-  // Add knowledge base if available
-  if (knowledgeBase && knowledgeBase.trim()) {
+  if (knowledgeBase?.trim()) {
     systemPrompt += '\n\nCommunity Information:\n' + knowledgeBase.trim();
   }
 
-  // Add custom instructions if available
-  if (settings.customInstructions && settings.customInstructions.trim()) {
+  if (settings.customInstructions?.trim()) {
     systemPrompt += '\n\nAdditional Instructions:\n' + settings.customInstructions.trim();
   }
 
-  // Much stricter rules
-  if (shouldForceResponse) {
-    systemPrompt += '\n\nIMPORTANT: You have been mentioned or someone replied to your message.';
-    systemPrompt += '\n- If you can answer their question using ONLY the community information above, provide a helpful answer';
-    systemPrompt += '\n- If you CANNOT answer from the community information, DO NOT RESPOND AT ALL';
-    systemPrompt += '\n- Do NOT make up information or guess';
-  } else {
-    systemPrompt += '\n\nCRITICAL: Only respond if you can answer the question using ONLY the community information provided above.';
-    systemPrompt += '\n- If the community information does not contain the answer, DO NOT RESPOND AT ALL';
-    systemPrompt += '\n- Do not say "I don\'t know" or "I can\'t help" - just don\'t respond';
-    systemPrompt += '\n- Do not make up information or guess';
-    systemPrompt += '\n- The information must be explicitly stated in the community information';
-  }
-
-  systemPrompt += '\n- Keep responses under 150 words';
-  systemPrompt += '\n- Be direct and helpful';
+  // NEW RULES
+  systemPrompt += `
+IMPORTANT:
+- If the user asks about community info, use ONLY the community information above.
+- If the user is greeting, small talking, or being social, reply naturally in the chosen style.
+- Never say "I don't know" — for casual talk, just keep the conversation flowing.
+- Keep replies under 150 words.`;
 
   return systemPrompt;
 }
 
 export function createQuestionAnalysisPrompt(): string {
-  return `Determine if this message is a question that needs an AI assistant response.
+  return `Determine if this message is a QUESTION that needs a factual AI assistant response.
 
 Respond "YES" if the message:
-- Asks a specific question about community rules, requirements, or processes
-- Asks "how to" do something specific
-- Requests specific information or numbers
-- Reports a problem that needs help
+- Asks about community rules, requirements, or processes
+- Asks "how to" do something
+- Requests specific numbers or details
+- Reports a problem needing help
 
 Respond "NO" if the message:
-- Is casual conversation, greetings, or small talk
-- Is just a statement or comment
-- Is off-topic or spam
-- Is too vague or general
-- Is users talking to each other
+- Is small talk, greetings, or casual conversation
+- Is vague or off-topic
 
-Only respond "YES" if you're confident the question can be answered with specific community information.
-
-Message to analyze:`;
+If "NO", the assistant may still respond socially — but it's not a factual Q&A.`;
 }
 
 // =============================================================================
@@ -178,15 +134,15 @@ class RateLimiter {
 // =============================================================================
 
 export class AIEngine {
-  private openai: OpenAI;
+  private ai: GoogleGenAI;
   private rateLimiter = new RateLimiter();
   private responseCache = new Map<string, { response: string; timestamp: number }>();
   private readonly CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
   constructor() {
-    this.openai = new OpenAI({
-      baseURL: 'https://openrouter.ai/api/v1',
-      apiKey: config.OPENROUTER_API_KEY,
+    // Initialize Gemini client with API key
+    this.ai = new GoogleGenAI({
+      apiKey: config.GEMINI_API_KEY || process.env.GEMINI_API_KEY
     });
 
     // Set up periodic cleanup for rate limiter and cache
@@ -271,7 +227,7 @@ export class AIEngine {
         }
       }
 
-      // Generate AI response - removed contradiction checking as it was too strict
+      // Generate AI response
       const aiResponse = await this.generateAIResponse(truncatedMessage, knowledgeBase, settings, companyId, shouldForceResponse, username);
       if (aiResponse) {
         // Store in cache (without username mention for reuse)
@@ -344,7 +300,6 @@ export class AIEngine {
       }
     }
 
-    // Remove all fuzzy matching, word similarity, and key phrase matching to prevent false positives
     return null;
   }
 
@@ -354,24 +309,23 @@ export class AIEngine {
   private async isQuestionAnalysis(message: string): Promise<boolean> {
     try {
       const response = await retry(async () => {
-        return await this.openai.chat.completions.create({
-          model: config.OPENROUTER_MODEL,
-          messages: [
-            {
-              role: 'system',
-              content: createQuestionAnalysisPrompt()
-            },
-            {
-              role: 'user',
-              content: message
-            }
+        // Using new Gemini syntax
+        const result = await this.ai.models.generateContent({
+          model: config.GEMINI_MODEL || "gemini-2.5-flash",
+          contents: [
+            createQuestionAnalysisPrompt(),
+            message
           ],
-          max_tokens: 10,
-          temperature: 0.1,
+          config: {
+            maxOutputTokens: 10,
+            temperature: 0.1
+          }
         });
+        
+        return result.text;
       });
 
-      const result = response.choices[0]?.message?.content?.trim().toUpperCase();
+      const result = response?.trim().toUpperCase();
       return result === 'YES';
       
     } catch (error) {
@@ -382,7 +336,7 @@ export class AIEngine {
   }
 
   /**
-   * Generate AI response using OpenRouter
+   * Generate AI response using Gemini
    */
   private async generateAIResponse(
     message: string, 
@@ -395,29 +349,30 @@ export class AIEngine {
     try {
       const systemPrompt = createSystemPrompt(knowledgeBase, settings, shouldForceResponse);
       
-      // Don't include conversation context - it causes confusion and duplicate responses
-      // const { dataManager } = await import('./data-manager');
-      // const context = dataManager.getFormattedContext(companyId);
-
       const response = await retry(async () => {
-        return await this.openai.chat.completions.create({
-          model: config.OPENROUTER_MODEL,
-          messages: [
+        // Using new Gemini syntax
+        const result = await this.ai.models.generateContent({
+          model: config.GEMINI_MODEL || "gemini-2.5-flash",
+          contents: [
             {
-              role: 'system',
-              content: systemPrompt
+              role: "system",
+              parts: [{ text: systemPrompt }]
             },
             {
-              role: 'user',
-              content: message // Just use the message without context
+              role: "user",
+              parts: [{ text: message }]
             }
           ],
-          max_tokens: config.MAX_AI_RESPONSE_TOKENS,
-          temperature: 0.1, // Very low temperature for consistent, deterministic responses
+          config: {
+            maxOutputTokens: config.MAX_AI_RESPONSE_TOKENS || 800,
+            temperature: 0.1
+          }
         });
+        
+        return result.text;
       });
 
-      let aiResponse = response.choices[0]?.message?.content?.trim();
+      let aiResponse = response?.trim();
       
       // Filter out ANY response that indicates uncertainty or inability to help
       if (aiResponse) {
@@ -522,11 +477,11 @@ export class AIEngine {
         ttlMs: this.CACHE_TTL_MS
       },
       rateLimiter: this.rateLimiter.getStats(),
-      model: config.OPENROUTER_MODEL,
+      model: config.GEMINI_MODEL || "gemini-2.5-flash",
       rateLimitPerMinute: config.AI_RATE_LIMIT_PER_MINUTE
     };
   }
 }
 
 // Create and export singleton instance
-export const aiEngine = new AIEngine(); 
+export const aiEngine = new AIEngine();

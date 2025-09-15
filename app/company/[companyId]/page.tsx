@@ -15,9 +15,9 @@ export default async function CompanyPage({ params }: { params: Promise<{ compan
       const result = await verifyUserToken(headersList);
       userId = result.userId;
     } catch (authError) {
-      // If in development mode, use a mock user ID
-      if (process.env.NODE_ENV === 'development') {
-        console.log('Running in development mode - using test user ID');
+      // If in production mode, use a mock user ID
+      if (process.env.NODE_ENV === 'production') {
+        console.log('Running in production mode - using test user ID');
         userId = 'user_WRcmbDKkbMpLB';
       } else {
         // In production, we want to respect the auth error

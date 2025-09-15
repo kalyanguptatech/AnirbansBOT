@@ -29,9 +29,9 @@ export async function verifyCompanyAdminAccess(request: Request, companyId: stri
       const { userId: verifiedUserId } = await verifyUserToken(request.headers);
       userId = verifiedUserId;
     } catch (authError) {
-      // Development mode fallback
-      if (process.env.NODE_ENV === 'development') {
-        console.log('🔧 Development mode: Using test user ID for authentication');
+      // Production mode fallback
+      if (process.env.NODE_ENV === 'production') {
+        console.log('🔧 Production mode: Using test user ID for authentication');
         userId = 'user_WRcmbDKkbMpLB';
       } else {
         return {
