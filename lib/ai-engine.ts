@@ -12,66 +12,79 @@ import { BotSettings, config, logger, retry, isQuestion, sanitizeText, truncateT
 // AI PROMPTS
 // =============================================================================
 
-export function createSystemPrompt(
-  knowledgeBase: string, 
-  settings: BotSettings, 
-  shouldForceResponse: boolean = false
-): string {
+export function createSystemPrompt(knowledgeBase: string, settings: BotSettings, shouldForceResponse: boolean = false): string {
   let systemPrompt = '';
 
+  // Base personality - keep it simple
   switch (settings.responseStyle) {
     case 'professional':
-      systemPrompt = 'You are a professional AI assistant. Be clear and respectful.';
+      systemPrompt = 'You are a helpful AI assistant for this community. Be professional and clear.';
       break;
     case 'friendly':
-      systemPrompt = 'You are a friendly AI assistant. Be warm, approachable, and kind.';
+      systemPrompt = 'You are a friendly AI assistant for this community. Be warm and helpful.';
       break;
     case 'casual':
-      systemPrompt = 'You are a casual AI assistant. Be relaxed, witty, and natural.';
+      systemPrompt = 'You are a casual AI assistant for this community. Be relaxed and friendly.';
       break;
     case 'technical':
-      systemPrompt = 'You are a technical AI assistant. Be precise and detailed.';
+      systemPrompt = 'You are a technical AI assistant for this community. Be precise and detailed.';
       break;
     case 'custom':
-      systemPrompt = settings.botPersonality || 'You are a helpful AI assistant.';
+      systemPrompt = settings.botPersonality || 'You are a helpful AI assistant for this community.';
       break;
     default:
-      systemPrompt = 'You are a helpful AI assistant.';
+      systemPrompt = 'You are a helpful AI assistant for this community.';
   }
 
-  if (knowledgeBase?.trim()) {
+  // Add knowledge base if available
+  if (knowledgeBase && knowledgeBase.trim()) {
     systemPrompt += '\n\nCommunity Information:\n' + knowledgeBase.trim();
   }
 
-  if (settings.customInstructions?.trim()) {
+  // Add custom instructions if available
+  if (settings.customInstructions && settings.customInstructions.trim()) {
     systemPrompt += '\n\nAdditional Instructions:\n' + settings.customInstructions.trim();
   }
 
-  // NEW RULES
-  systemPrompt += `
-IMPORTANT:
-- If the user asks about community info, use ONLY the community information above.
-- If the user is greeting, small talking, or being social, reply naturally in the chosen style.
-- Never say "I don't know" — for casual talk, just keep the conversation flowing.
-- Keep replies under 150 words.`;
+  // Much stricter rules
+  if (shouldForceResponse) {
+    systemPrompt += '\n\nIMPORTANT: You have been mentioned or someone replied to your message.';
+    systemPrompt += '\n- If you can answer their question using ONLY the community information above, provide a helpful answer';
+    systemPrompt += '\n- If you CANNOT answer from the community information, DO NOT RESPOND AT ALL';
+    systemPrompt += '\n- Do NOT make up information or guess';
+  } else {
+    systemPrompt += '\n\nCRITICAL: Only respond if you can answer the question using ONLY the community information provided above.';
+    systemPrompt += '\n- If the community information does not contain the answer, DO NOT RESPOND AT ALL';
+    systemPrompt += '\n- Do not say "I don\'t know" or "I can\'t help" - just don\'t respond';
+    systemPrompt += '\n- Do not make up information or guess';
+    systemPrompt += '\n- The information must be explicitly stated in the community information';
+  }
+
+  systemPrompt += '\n- Keep responses under 150 words';
+  systemPrompt += '\n- Be direct and helpful';
 
   return systemPrompt;
 }
 
 export function createQuestionAnalysisPrompt(): string {
-  return `Determine if this message is a QUESTION that needs a factual AI assistant response.
+  return `Determine if this message is a question that needs an AI assistant response.
 
 Respond "YES" if the message:
-- Asks about community rules, requirements, or processes
-- Asks "how to" do something
-- Requests specific numbers or details
-- Reports a problem needing help
+- Asks a specific question about community rules, requirements, or processes
+- Asks "how to" do something specific
+- Requests specific information or numbers
+- Reports a problem that needs help
 
 Respond "NO" if the message:
-- Is small talk, greetings, or casual conversation
-- Is vague or off-topic
+- Is casual conversation, greetings, or small talk
+- Is just a statement or comment
+- Is off-topic or spam
+- Is too vague or general
+- Is users talking to each other
 
-If "NO", the assistant may still respond socially — but it's not a factual Q&A.`;
+Only respond "YES" if you're confident the question can be answered with specific community information.
+
+Message to analyze:`;
 }
 
 // =============================================================================
@@ -260,7 +273,7 @@ export class AIEngine {
   }
 
   /**
-   * Check if message matches any preset Q&A
+   * Check if message matches any preset Q&A with improved semantic matching
    */
   private checkPresetQA(message: string, presetQA: Array<{question: string, answer: string, enabled: boolean}>, username?: string): string | null {
     if (!presetQA || presetQA.length === 0) {
@@ -269,38 +282,262 @@ export class AIEngine {
 
     const messageLower = message.toLowerCase().trim();
 
+    // First pass: Try direct matching for efficiency
     for (const qa of presetQA) {
       if (!qa.enabled) continue;
 
       const questionLower = qa.question.toLowerCase().trim();
 
-      // Skip very short questions (less than 5 chars) to prevent over-matching
-      if (questionLower.length < 5) {
+      // Skip very short questions (less than 3 chars)
+      if (questionLower.length < 3) {
         continue;
       }
 
-      // 1. Exact match only (case insensitive) - most conservative
+      // 1. Exact match (case insensitive)
       if (messageLower === questionLower) {
         logger.debug('Preset Q&A exact match found', {
           question: qa.question,
-          answer: qa.answer,
           messagePreview: message.substring(0, 50)
         });
         return username ? `@${username} ${qa.answer}` : qa.answer;
       }
 
-      // 2. Very strict contains match - only if the question is short and message contains it exactly
+      // 2. Contains match for short questions
       if (questionLower.length <= 15 && messageLower.includes(questionLower)) {
-        logger.debug('Preset Q&A strict contains match found', {
+        logger.debug('Preset Q&A contains match found', {
           question: qa.question,
-          answer: qa.answer,
           messagePreview: message.substring(0, 50)
         });
         return username ? `@${username} ${qa.answer}` : qa.answer;
       }
     }
 
+    // Second pass: Try semantic/fuzzy matching
+    // This is where we implement more flexible matching
+
+    // Extract key entities and concepts from the message
+    const normalizedMessage = this.normalizeQuestion(messageLower);
+    
+    // Track best match
+    let bestMatch = {
+      qa: null as any,
+      score: 0
+    };
+
+    for (const qa of presetQA) {
+      if (!qa.enabled) continue;
+
+      const questionLower = qa.question.toLowerCase().trim();
+      const normalizedQuestion = this.normalizeQuestion(questionLower);
+      
+      // Skip very short questions to prevent false matches
+      if (questionLower.length < 5) {
+        continue;
+      }
+
+      // 3. Name/entity recognition
+      // "Who is John?" should match "Who's John?" or "Tell me about John"
+      const nameMatch = this.matchNames(normalizedMessage, normalizedQuestion);
+      if (nameMatch && nameMatch.score > 0.8) {
+        logger.debug('Preset Q&A name match found', {
+          question: qa.question,
+          messagePreview: message.substring(0, 50),
+          score: nameMatch.score
+        });
+        return username ? `@${username} ${qa.answer}` : qa.answer;
+      }
+      
+      // 4. Semantic similarity scoring
+      const similarityScore = this.calculateSimilarity(normalizedMessage, normalizedQuestion);
+      
+      // Update best match if this score is higher
+      if (similarityScore > bestMatch.score && similarityScore > 0.7) {
+        bestMatch = {
+          qa,
+          score: similarityScore
+        };
+      }
+    }
+
+    // If we found a good semantic match
+    if (bestMatch.qa && bestMatch.score > 0.7) {
+      logger.debug('Preset Q&A semantic match found', {
+        question: bestMatch.qa.question,
+        messagePreview: message.substring(0, 50),
+        score: bestMatch.score
+      });
+      return username ? `@${username} ${bestMatch.qa.answer}` : bestMatch.qa.answer;
+    }
+
+    // No match found
     return null;
+  }
+
+  /**
+   * Normalize a question for better matching by removing filler words and standardizing format
+   */
+  private normalizeQuestion(text: string): string {
+    // Remove filler words and standardize punctuation
+    const fillerWords = ['a', 'an', 'the', 'is', 'are', 'was', 'were', 'will', 'would', 'should', 'could', 'do', 'does', 'did', 'has', 'have', 'had', 'can', 'may', 'might', 'must', 'shall', 'please', 'about'];
+    
+    let normalized = text.toLowerCase()
+      .replace(/[^\w\s?]/g, ' ')        // Replace punctuation with spaces
+      .replace(/\s+/g, ' ')             // Replace multiple spaces with a single space
+      .trim();
+
+    // Remove common filler words when they're standalone
+    normalized = ' ' + normalized + ' ';
+    for (const word of fillerWords) {
+      normalized = normalized.replace(new RegExp(` ${word} `, 'g'), ' ');
+    }
+    
+    // Handle common question variants
+    normalized = normalized
+      .replace(/^who is /i, 'who ')
+      .replace(/^what is /i, 'what ')
+      .replace(/^where is /i, 'where ')
+      .replace(/^when is /i, 'when ')
+      .replace(/^why is /i, 'why ')
+      .replace(/^how is /i, 'how ')
+      .replace(/^tell me about /i, 'who ')
+      .replace(/^tell me /i, '');
+    
+    return normalized.trim();
+  }
+
+  /**
+   * Check if names/entities in two questions match
+   */
+  private matchNames(message: string, question: string): { matched: boolean, score: number } | null {
+    // Extract potential names (capitalized words or words after "who is", "about", etc.)
+    const namePatterns = [
+      /who(?:'s| is| are)? ([a-zA-Z0-9\s]+)/i,
+      /about ([a-zA-Z0-9\s]+)/i,
+      /([A-Z][a-z]+)/g
+    ];
+
+    // Try to extract names from both message and question
+    let messageNames: string[] = [];
+    let questionNames: string[] = [];
+    
+    for (const pattern of namePatterns) {
+      const msgMatches = message.match(pattern);
+      const qMatches = question.match(pattern);
+      
+      if (msgMatches) messageNames = [...messageNames, ...msgMatches.slice(1)];
+      if (qMatches) questionNames = [...questionNames, ...qMatches.slice(1)];
+    }
+    
+    // Clean up extracted names
+    messageNames = messageNames
+      .filter(name => name && name.length > 2)
+      .map(name => name.toLowerCase().trim());
+    
+    questionNames = questionNames
+      .filter(name => name && name.length > 2)
+      .map(name => name.toLowerCase().trim());
+    
+    // If both have extracted names, check for matches
+    if (messageNames.length > 0 && questionNames.length > 0) {
+      for (const msgName of messageNames) {
+        for (const qName of questionNames) {
+          // Check for direct match or contained match for longer names
+          if (msgName === qName || 
+              (qName.length > 5 && msgName.includes(qName)) || 
+              (msgName.length > 5 && qName.includes(msgName))) {
+            
+            return { 
+              matched: true, 
+              score: msgName === qName ? 1.0 : 0.85  // Exact match gets perfect score
+            };
+          }
+        }
+      }
+    }
+    
+    return null;
+  }
+
+  
+  /**
+   * Calculate word-based similarity score between two texts
+   */
+  private calculateSimilarity(text1: string, text2: string): number {
+    // Simple word overlap algorithm
+    const words1 = new Set(text1.split(' '));
+    const words2 = new Set(text2.split(' '));
+    
+    // Calculate Jaccard similarity
+    const intersection = new Set([...words1].filter(x => words2.has(x)));
+    const union = new Set([...words1, ...words2]);
+    
+    if (union.size === 0) return 0;
+    
+    // Calculate weighted score based on matching keywords
+    let score = intersection.size / union.size;
+    
+    // Boost score if the texts share multiple meaningful words (not just common words)
+    const significantMatches = [...intersection].filter(word => 
+      word.length > 3 && 
+      !['what', 'when', 'where', 'which', 'who', 'why', 'how'].includes(word)
+    );
+    
+    if (significantMatches.length >= 2) {
+      score += 0.2; // Boost if multiple significant words match
+    }
+    
+    return Math.min(1.0, score); // Cap at 1.0
+  }
+
+  /**
+   * Cleanup expired cache entries and rate limits
+   */
+  private cleanup() {
+    const now = Date.now();
+    let cleanedCount = 0;
+
+    // Clean rate limiter
+    this.rateLimiter.cleanup();
+
+    // Clean response cache
+    for (const [key, entry] of this.responseCache.entries()) {
+      if (now > entry.timestamp + this.CACHE_TTL_MS) {
+        this.responseCache.delete(key);
+        cleanedCount++;
+      }
+    }
+
+    if (cleanedCount > 0) {
+      logger.debug('AI engine cleanup completed', { 
+        cleanedCacheEntries: cleanedCount,
+        remainingCacheSize: this.responseCache.size
+      });
+    }
+  }
+
+  /**
+   * Clear rate limits (for admin commands)
+   */
+  clearRateLimits() {
+    this.rateLimiter.clear();
+    this.responseCache.clear();
+    logger.debug('Cleared AI rate limits and response cache');
+  }
+
+  /**
+   * Get stats for monitoring
+   */
+  getStats() {
+    return {
+      responseCache: {
+        size: this.responseCache.size,
+        maxSize: 0,
+        ttlMs: this.CACHE_TTL_MS
+      },
+      rateLimiter: this.rateLimiter.getStats(),
+      model: config.GEMINI_MODEL || "gemini-2.5-flash",
+      rateLimitPerMinute: config.AI_RATE_LIMIT_PER_MINUTE
+    };
   }
 
   /**
@@ -309,7 +546,7 @@ export class AIEngine {
   private async isQuestionAnalysis(message: string): Promise<boolean> {
     try {
       const response = await retry(async () => {
-        // Using new Gemini syntax
+        // Using Gemini syntax
         const result = await this.ai.models.generateContent({
           model: config.GEMINI_MODEL || "gemini-2.5-flash",
           contents: [
@@ -350,7 +587,7 @@ export class AIEngine {
       const systemPrompt = createSystemPrompt(knowledgeBase, settings, shouldForceResponse);
       
       const response = await retry(async () => {
-        // Using new Gemini syntax
+        // Using Gemini syntax
         const result = await this.ai.models.generateContent({
           model: config.GEMINI_MODEL || "gemini-2.5-flash",
           contents: [
@@ -365,7 +602,7 @@ export class AIEngine {
           ],
           config: {
             maxOutputTokens: config.MAX_AI_RESPONSE_TOKENS || 800,
-            temperature: 0.1
+            temperature: 0.7
           }
         });
         
@@ -429,57 +666,6 @@ export class AIEngine {
       logger.error('Error generating AI response', error as Error, { messagePreview: message.substring(0, 50) });
       return null;
     }
-  }
-
-  /**
-   * Cleanup expired cache entries and rate limits
-   */
-  private cleanup() {
-    const now = Date.now();
-    let cleanedCount = 0;
-
-    // Clean rate limiter
-    this.rateLimiter.cleanup();
-
-    // Clean response cache
-    for (const [key, entry] of this.responseCache.entries()) {
-      if (now > entry.timestamp + this.CACHE_TTL_MS) {
-        this.responseCache.delete(key);
-        cleanedCount++;
-      }
-    }
-
-    if (cleanedCount > 0) {
-      logger.debug('AI engine cleanup completed', { 
-        cleanedCacheEntries: cleanedCount,
-        remainingCacheSize: this.responseCache.size
-      });
-    }
-  }
-
-  /**
-   * Clear rate limits (for admin commands)
-   */
-  clearRateLimits() {
-    this.rateLimiter.clear();
-    this.responseCache.clear();
-    logger.debug('Cleared AI rate limits and response cache');
-  }
-
-  /**
-   * Get stats for monitoring
-   */
-  getStats() {
-    return {
-      responseCache: {
-        size: this.responseCache.size,
-        maxSize: 0,
-        ttlMs: this.CACHE_TTL_MS
-      },
-      rateLimiter: this.rateLimiter.getStats(),
-      model: config.GEMINI_MODEL || "gemini-2.5-flash",
-      rateLimitPerMinute: config.AI_RATE_LIMIT_PER_MINUTE
-    };
   }
 }
 
