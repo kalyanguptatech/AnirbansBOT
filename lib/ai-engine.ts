@@ -47,18 +47,18 @@ export function createSystemPrompt(knowledgeBase: string, settings: BotSettings,
   }
 
   // Much stricter rules
-  if (shouldForceResponse) {
-    systemPrompt += '\n\nIMPORTANT: You have been mentioned or someone replied to your message.';
-    systemPrompt += '\n- If you can answer their question using ONLY the community information above, provide a helpful answer';
-    systemPrompt += '\n- If you CANNOT answer from the community information, DO NOT RESPOND AT ALL';
-    systemPrompt += '\n- Do NOT make up information or guess';
-  } else {
-    systemPrompt += '\n\nCRITICAL: Only respond if you can answer the question using ONLY the community information provided above.';
-    systemPrompt += '\n- If the community information does not contain the answer, DO NOT RESPOND AT ALL';
-    systemPrompt += '\n- Do not say "I don\'t know" or "I can\'t help" - just don\'t respond';
-    systemPrompt += '\n- Do not make up information or guess';
-    systemPrompt += '\n- The information must be explicitly stated in the community information';
-  }
+if (shouldForceResponse) {
+  systemPrompt += '\n\nIMPORTANT: You have been mentioned or someone replied to your message.';
+  systemPrompt += '\n- If you can answer their question using ONLY the community information above, provide a helpful answer';
+  systemPrompt += '\n- If the community information does not contain the answer, politely ask the user to clarify their question';
+  systemPrompt += '\n- Do NOT make up information or guess';
+} else {
+  systemPrompt += '\n\nCRITICAL: Only respond if you can answer the question using ONLY the community information provided above.';
+  systemPrompt += '\n- If the community information does not contain the answer, politely ask the user to clarify their question';
+  systemPrompt += '\n- Do not make up information or guess';
+  systemPrompt += '\n- The information must be explicitly stated in the community information';
+}
+
 
   systemPrompt += '\n- Keep responses under 150 words';
   systemPrompt += '\n- Be direct and helpful';
@@ -75,8 +75,12 @@ Respond "YES" if the message:
 - Requests specific information or numbers
 - Reports a problem that needs help
 
+Respond "GREET" if the message:
+- Is only a greeting like "hi", "hello", "hey", "good morning", etc.
+- Does not ask a question or mention/tag someone
+
 Respond "NO" if the message:
-- Is casual conversation, greetings, or small talk
+- Is casual conversation or small talk beyond greetings
 - Is just a statement or comment
 - Is off-topic or spam
 - Is too vague or general
@@ -86,6 +90,7 @@ Only respond "YES" if you're confident the question can be answered with specifi
 
 Message to analyze:`;
 }
+
 
 // =============================================================================
 // RATE LIMITING
@@ -229,16 +234,33 @@ export class AIEngine {
       }
 
       // AI analysis - skip question detection if forced response
-      if (!shouldForceResponse) {
-        const isActualQuestion = await this.isQuestionAnalysis(truncatedMessage);
-        if (!isActualQuestion) {
-          logger.debug('AI determined message is not a question', { 
-            companyId, 
-            messagePreview: truncatedMessage.substring(0, 50) 
-          });
-          return null;
-        }
-      }
+// AI analysis - skip question detection if forced response
+if (!shouldForceResponse) {
+  const analysisResult = await this.isQuestionAnalysis(truncatedMessage);
+
+  if (analysisResult === "NO") {
+    logger.debug('AI determined message is not a question', { 
+      companyId, 
+      messagePreview: truncatedMessage.substring(0, 50) 
+    });
+    return null;
+  }
+
+  if (analysisResult === "GREET") {
+    logger.debug('AI detected greeting', { 
+      companyId, 
+      messagePreview: truncatedMessage.substring(0, 50) 
+    });
+
+    // Simple friendly reply
+    const greetingResponse = username 
+      ? `@${username} Hello! 👋 How can I help you today?` 
+      : `Hello! 👋 How can I help you today?`;
+
+    return greetingResponse;
+  }
+}
+
 
       // Generate AI response
       const aiResponse = await this.generateAIResponse(truncatedMessage, knowledgeBase, settings, companyId, shouldForceResponse, username);
@@ -543,34 +565,35 @@ export class AIEngine {
   /**
    * Use AI to determine if a message is actually a question
    */
-  private async isQuestionAnalysis(message: string): Promise<boolean> {
-    try {
-      const response = await retry(async () => {
-        // Using Gemini syntax
-        const result = await this.ai.models.generateContent({
-          model: config.GEMINI_MODEL || "gemini-2.5-flash",
-          contents: [
-            createQuestionAnalysisPrompt(),
-            message
-          ],
-          config: {
-            maxOutputTokens: 10,
-            temperature: 0.1
-          }
-        });
-        
-        return result.text;
+  private async isQuestionAnalysis(message: string): Promise<"YES" | "NO" | "GREET"> {
+  try {
+    const response = await retry(async () => {
+      const result = await this.ai.models.generateContent({
+        model: config.GEMINI_MODEL || "gemini-2.5-flash",
+        contents: [
+          createQuestionAnalysisPrompt(),
+          message
+        ],
+        config: {
+          maxOutputTokens: 10,
+          temperature: 0.1
+        }
       });
 
-      const result = response?.trim().toUpperCase();
-      return result === 'YES';
-      
-    } catch (error) {
-      logger.error('Error in question analysis', error as Error, { messagePreview: message.substring(0, 50) });
-      // Default to true if AI analysis fails
-      return true;
-    }
+      return result.text;
+    });
+
+    const result = response?.trim().toUpperCase();
+    if (result === "YES" || result === "GREET") return result;
+    return "NO";
+    
+  } catch (error) {
+    logger.error('Error in question analysis', error as Error, { messagePreview: message.substring(0, 50) });
+    // Default to "YES" if analysis fails
+    return "YES";
   }
+}
+
 
   /**
    * Generate AI response using Gemini
