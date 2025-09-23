@@ -198,7 +198,7 @@ export class AIEngine {
       }
 
       // If the message is forcing a response (direct bot mention), process it
-      const botUsername = 'anirbanbots-agent';
+      const botUsername = 'anirbanbot'; // Fallback bot username
       const normalizedBotUsername = botUsername.toLowerCase().replace(/^@/, '');
       const isBotMentioned = truncatedMessage.toLowerCase().includes(`@${normalizedBotUsername}`);
       
@@ -821,7 +821,7 @@ export class AIEngine {
     // Get the bot username from config or use fallback
     const actualBotUsername = botUsername || 
                          process.env.BOT_USERNAME ||
-                         'anirbanbots-agent';
+                         'anirbanbot';
                          
     // Normalize bot username (remove @ and convert to lowercase)
     const normalizedBotUsername = actualBotUsername.toLowerCase().replace(/^@/, '');
