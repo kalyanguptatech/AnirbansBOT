@@ -46,22 +46,24 @@ export function createSystemPrompt(knowledgeBase: string, settings: BotSettings,
     systemPrompt += '\n\nAdditional Instructions:\n' + settings.customInstructions.trim();
   }
 
-  // Much stricter rules
+  // Modified rules to allow general knowledge responses when appropriate
   if (shouldForceResponse) {
     systemPrompt += '\n\nIMPORTANT: You have been mentioned or someone replied to your message.';
-    systemPrompt += '\n- If you can answer their question using ONLY the community information above, provide a helpful answer';
-    systemPrompt += '\n- If you CANNOT answer from the community information, DO NOT RESPOND AT ALL';
-    systemPrompt += '\n- Do NOT make up information or guess';
+    systemPrompt += '\n- First try to answer using the community information provided above';
+    systemPrompt += '\n- If the community information doesn\'t contain the answer, you may use your general knowledge';
+    systemPrompt += '\n- If you use general knowledge, start your response with "Based on my general knowledge: "';
+    systemPrompt += '\n- If you cannot answer with confidence, reply with "I don\'t have enough information about that in the community knowledge base."';
   } else {
-    systemPrompt += '\n\nCRITICAL: Only respond if you can answer the question using ONLY the community information provided above.';
-    systemPrompt += '\n- If the community information does not contain the answer, DO NOT RESPOND AT ALL';
-    systemPrompt += '\n- Do not say "I don\'t know" or "I can\'t help" - just don\'t respond';
-    systemPrompt += '\n- Do not make up information or guess';
-    systemPrompt += '\n- The information must be explicitly stated in the community information';
+    systemPrompt += '\n\nResponse Guidelines:';
+    systemPrompt += '\n- First try to answer using the community information provided above';
+    systemPrompt += '\n- If the community information doesn\'t contain the answer, you may use your general knowledge';
+    systemPrompt += '\n- If you use general knowledge, start your response with "Based on my general knowledge: "';
+    systemPrompt += '\n- If you cannot answer with confidence, reply with "I don\'t have enough information about that in the community knowledge base."';
   }
 
   systemPrompt += '\n- Keep responses under 150 words';
   systemPrompt += '\n- Be direct and helpful';
+  systemPrompt += '\n- NEVER make up information about the community';
 
   return systemPrompt;
 }
@@ -611,47 +613,42 @@ export class AIEngine {
 
       let aiResponse = response?.trim();
       
-      // Filter out ANY response that indicates uncertainty or inability to help
+      // Filter out truly unhelpful responses but allow "based on my general knowledge" responses
       if (aiResponse) {
         const responseLower = aiResponse.toLowerCase();
         
-        // Comprehensive list of phrases that indicate the AI can't/shouldn't respond
-        const cantHelpPhrases = [
-          'i don\'t have',
-          'i cannot',
-          'i can\'t',
-          'don\'t have information',
-          'cannot provide',
-          'can\'t provide',
-          'unable to',
-          'not able to',
-          'no information',
-          'don\'t know',
-          'cannot answer',
-          'can\'t answer',
-          'not sure',
-          'unclear',
-          'contact the',
-          'ask the admin',
-          'ask an admin',
-          'check with',
-          'not specified',
-          'not mentioned',
-          'doesn\'t say',
-          'does not say',
-          'no details',
-          'not clear',
-          'not available'
-        ];
+        // Check if response is using general knowledge (which is now allowed)
+        const isGeneralKnowledge = responseLower.includes('based on my general knowledge');
         
-        // If response contains any "can't help" phrases, don't respond
-        if (cantHelpPhrases.some(phrase => responseLower.includes(phrase))) {
-          logger.debug('Filtered out uncertain/unhelpful response', {
-            companyId,
-            messagePreview: message.substring(0, 50),
-            filteredResponse: aiResponse.substring(0, 100)
-          });
-          return null;
+        // Only filter unhelpful responses if they're not explicitly using general knowledge
+        if (!isGeneralKnowledge) {
+          // Comprehensive list of phrases that indicate the AI can't/shouldn't respond
+          const cantHelpPhrases = [
+            'don\'t have enough information',
+            'i don\'t have enough information',
+            'unable to provide specific information',
+            'would need more information',
+            'don\'t have specific information',
+            'don\'t have the specific details',
+            'no specific information',
+            'without more information',
+            'without specific information',
+            'need more details',
+            'need more context',
+            'not provided in the community information',
+            'not specified in the information',
+            'not mentioned in the provided information'
+          ];
+          
+          // If response contains any "can't help" phrases, don't respond
+          if (cantHelpPhrases.some(phrase => responseLower.includes(phrase))) {
+            logger.debug('Filtered out uncertain/unhelpful response', {
+              companyId,
+              messagePreview: message.substring(0, 50),
+              filteredResponse: aiResponse.substring(0, 100)
+            });
+            return null;
+          }
         }
       }
       
