@@ -787,7 +787,7 @@ class BotWebSocket {
       }, 1000);
     };
 
-    process.on('SIGINT', () => shutdown('SIGINT'));
+    process.on('SIGINT', () => console.log('Received SIGINT, shutting down gracefully...'));
     process.on('SIGTERM', () => shutdown('SIGTERM'));
   }
 

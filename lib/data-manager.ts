@@ -681,7 +681,8 @@ export const dataManager = new DataManager();
 
 // Graceful shutdown handling
 process.on('SIGINT', async () => {
-  await dataManager.disconnect();
+  // await dataManager.disconnect();
+  console.log('Received SIGINT, shutting down gracefully...');
 });
 
 process.on('SIGTERM', async () => {
