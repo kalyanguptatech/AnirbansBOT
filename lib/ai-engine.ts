@@ -46,24 +46,16 @@ export function createSystemPrompt(knowledgeBase: string, settings: BotSettings,
     systemPrompt += '\n\nAdditional Instructions:\n' + settings.customInstructions.trim();
   }
 
-  // Much stricter rules
-  if (shouldForceResponse) {
-    systemPrompt += '\n\nIMPORTANT: You have been mentioned or someone replied to your message.';
-    systemPrompt += '\n- If you can answer their question using ONLY the community information above, provide a helpful answer';
-    systemPrompt += '\n- If you CANNOT answer from the community information, DO NOT RESPOND AT ALL';
-    systemPrompt += '\n- Do NOT make up information or guess';
-  } else {
-    systemPrompt += '\n\nCRITICAL: Only respond if you can answer the question using ONLY the community information provided above.';
-    systemPrompt += '\n- If the community information does not contain the answer, DO NOT RESPOND AT ALL';
-    systemPrompt += '\n- Do not say "I don\'t know" or "I can\'t help" - just don\'t respond';
-    systemPrompt += '\n- Do not make up information or guess';
-    systemPrompt += '\n- The information must be explicitly stated in the community information';
-  }
-
+  // Less restrictive guidelines that encourage responses
+  systemPrompt += '\n\nResponse Guidelines:';
+  systemPrompt += '\n- Try to answer using the community information provided above when possible';
+  systemPrompt += '\n- If the community information doesn\'t have the answer, use your general knowledge';
+  systemPrompt += '\n- If using general knowledge, start your response with "Based on my general knowledge: "';
+  systemPrompt += '\n- Always try to provide a helpful response';
   systemPrompt += '\n- Keep responses under 150 words';
   systemPrompt += '\n- Be direct and helpful';
-  systemPrompt += '\n- NEVER make up information about the community';
-
+  systemPrompt += '\n- Don\'t make up specific facts about the community that aren\'t in the information';
+  
   return systemPrompt;
 }
 
@@ -81,13 +73,17 @@ Respond "GREET" if the message:
 - Does not ask a question or mention/tag someone
 
 Respond "NO" if the message:
-- Is casual conversation or small talk beyond greetings
-- Is just a statement or comment
+- Is directed at another specific user (not the bot)
+- References a previous conversation with another user
+- Contains phrases like "not you", "talking to [name]", "I'm asking [name]"
+- Is responding to something another user said
+- Is casual conversation or small talk between users
+- Is just a statement or comment like "okay", "thanks", "alright"
+- Is a short acknowledgement like "yessir", "got it", "bet", "alright"
 - Is off-topic or spam
 - Is too vague or general
-- Is users talking to each other
 
-Only respond "YES" if you're confident the question can be answered with specific community information.
+Only respond "YES" if you're confident the question needs the bot to answer.
 
 Message to analyze:`;
 }
@@ -179,7 +175,8 @@ export class AIEngine {
     settings: BotSettings,
     companyId: string,
     shouldForceResponse: boolean = false,
-    username?: string
+    username?: string,
+    recentMessages: Array<{text: string, username: string, isBot: boolean}> = []
   ): Promise<string | null> {
     try {
       // Input validation
@@ -190,6 +187,42 @@ export class AIEngine {
       // Sanitize and truncate message
       const cleanMessage = sanitizeText(message);
       const truncatedMessage = truncateText(cleanMessage, config.MAX_MESSAGE_LENGTH);
+      
+      // CRITICAL CHECK: If the message is mentioning another user (not the bot),
+      // we should NEVER respond to avoid interrupting human conversations
+      if (this.isMessageTaggingAnotherUser(truncatedMessage)) {
+        logger.debug('Skipping response - message tagging another user', {
+          messagePreview: truncatedMessage.substring(0, 50)
+        });
+        return null;
+      }
+
+      // If the message is forcing a response (direct bot mention), process it
+      const botUsername = 'anirbanbots-agent';
+      const normalizedBotUsername = botUsername.toLowerCase().replace(/^@/, '');
+      const isBotMentioned = truncatedMessage.toLowerCase().includes(`@${normalizedBotUsername}`);
+      
+      if (!isBotMentioned && !shouldForceResponse) {
+        // If the bot isn't mentioned and no force response, apply additional checks
+        
+        // Check if this is just an acknowledgment to the bot's message
+        if (this.isAcknowledgmentToBot(truncatedMessage, recentMessages)) {
+          logger.debug('Skipping response - detected acknowledgment to bot', {
+            companyId,
+            messagePreview: truncatedMessage.substring(0, 50)
+          });
+          return null;
+        }
+
+        // Skip if the message appears to be part of a user-to-user conversation
+        if (this.isUserToUserConversation(truncatedMessage, recentMessages)) {
+          logger.debug('Skipping response - detected user-to-user conversation', {
+            companyId,
+            messagePreview: truncatedMessage.substring(0, 50)
+          });
+          return null;
+        }
+      }
 
       // Rate limiting
       if (!this.rateLimiter.isAllowed(`ai_${companyId}`, config.AI_RATE_LIMIT_PER_MINUTE)) {
@@ -210,61 +243,47 @@ export class AIEngine {
           : cachedEntry.response;
       }
 
-      // If bot should force response (mentioned or replying to bot), skip question detection
-      const shouldRespond = shouldForceResponse || isQuestion(truncatedMessage);
-      
-      if (!shouldRespond) {
-        logger.debug('Message does not appear to be a question and no forced response needed', { 
-          companyId, 
-          messagePreview: truncatedMessage.substring(0, 50),
-          shouldForceResponse
-        });
-        return null;
-      }
-
       // Check preset Q&A first
       const presetResponse = this.checkPresetQA(truncatedMessage, settings.presetQA || [], username);
       if (presetResponse) {
         logger.info('Found preset Q&A match', { 
           companyId, 
           messagePreview: truncatedMessage.substring(0, 50),
-          responseLength: presetResponse.length,
-          shouldForceResponse
+          responseLength: presetResponse.length
         });
         return presetResponse;
       }
 
-      // AI analysis - skip question detection if forced response
-// AI analysis - skip question detection if forced response
-if (!shouldForceResponse) {
-  const analysisResult = await this.isQuestionAnalysis(truncatedMessage);
+      // AI analysis to categorize the message
+      const analysisResult = await this.isQuestionAnalysis(truncatedMessage);
 
-  if (analysisResult === "NO") {
-    logger.debug('AI determined message is not a question', { 
-      companyId, 
-      messagePreview: truncatedMessage.substring(0, 50) 
-    });
-    return null;
-  }
+      // Handle greetings with a friendly response
+      if (analysisResult === "GREET") {
+        logger.debug('AI detected greeting', { 
+          companyId, 
+          messagePreview: truncatedMessage.substring(0, 50) 
+        });
 
-  if (analysisResult === "GREET") {
-    logger.debug('AI detected greeting', { 
-      companyId, 
-      messagePreview: truncatedMessage.substring(0, 50) 
-    });
+        const greetings = [
+          `Hello! 👋 How can I help you today?`,
+          `Hi there! 👋 Need any assistance today?`,
+          `Hey! 👋 What can I help you with?`,
+          `Good day! 👋 How may I assist you?`,
+          `Welcome! 👋 Let me know if you need any help!`
+        ];
+        
+        const randomGreeting = greetings[Math.floor(Math.random() * greetings.length)];
+        const greetingResponse = username ? `@${username} ${randomGreeting}` : randomGreeting;
+        
+        return greetingResponse;
+      }
 
-    // Simple friendly reply
-    const greetingResponse = username 
-      ? `@${username} Hello! 👋 How can I help you today?` 
-      : `Hello! 👋 How can I help you today?`;
-
-    return greetingResponse;
-  }
-}
-
-
+      // For all other messages (YES or NO), generate a response
+      // We're being more permissive now, so we'll respond regardless of the analysis result
+      // This ensures the bot is more conversational
+      
       // Generate AI response
-      const aiResponse = await this.generateAIResponse(truncatedMessage, knowledgeBase, settings, companyId, shouldForceResponse, username);
+      const aiResponse = await this.generateAIResponse(truncatedMessage, knowledgeBase, settings, companyId, shouldForceResponse || analysisResult === "YES", username);
       if (aiResponse) {
         // Store in cache (without username mention for reuse)
         const responseToCache = aiResponse.startsWith(`@${username}`) 
@@ -278,8 +297,7 @@ if (!shouldForceResponse) {
         logger.info('Generated new AI response', { 
           companyId, 
           messagePreview: truncatedMessage.substring(0, 50),
-          responseLength: aiResponse.length,
-          shouldForceResponse
+          responseLength: aiResponse.length
         });
       }
 
@@ -288,8 +306,7 @@ if (!shouldForceResponse) {
     } catch (error) {
       logger.error('Error in AI analysis', error as Error, { 
         companyId, 
-        messagePreview: message.substring(0, 50),
-        shouldForceResponse
+        messagePreview: message.substring(0, 50)
       });
       return null;
     }
@@ -575,7 +592,7 @@ if (!shouldForceResponse) {
           createQuestionAnalysisPrompt(),
           message
         ],
-        config: {
+        config: {  // CHANGED: config → generationConfig
           maxOutputTokens: 10,
           temperature: 0.1
         }
@@ -585,12 +602,21 @@ if (!shouldForceResponse) {
     });
 
     const result = response?.trim().toUpperCase();
-    if (result === "YES" || result === "GREET") return result;
-    return "NO";
+    
+    // More robust result checking
+    if (result === "GREET") {
+      logger.debug('Detected greeting', { result, messagePreview: message.substring(0, 50) });
+      return "GREET";
+    } else if (result === "YES") {
+      return "YES";
+    } else {
+      // Default to NO for any other response
+      return "NO";
+    }
     
   } catch (error) {
     logger.error('Error in question analysis', error as Error, { messagePreview: message.substring(0, 50) });
-    // Default to "YES" if analysis fails
+    // Default to "YES" if analysis fails to ensure we respond
     return "YES";
   }
 }
@@ -611,20 +637,24 @@ if (!shouldForceResponse) {
       const systemPrompt = createSystemPrompt(knowledgeBase, settings, shouldForceResponse);
       
       const response = await retry(async () => {
-        // Using Gemini syntax
+        // Using Gemini syntax - note the change from "system" to "user" for the system prompt
         const result = await this.ai.models.generateContent({
           model: config.GEMINI_MODEL || "gemini-2.5-flash",
           contents: [
             {
-              role: "system",
-              parts: [{ text: systemPrompt }]
+              role: "user", // CHANGED: system → user
+              parts: [{ text: "System Instructions: " + systemPrompt }]
+            },
+            {
+              role: "model", // CHANGED: Include model response to system instructions
+              parts: [{ text: "I understand and will follow these instructions." }]
             },
             {
               role: "user",
               parts: [{ text: message }]
             }
           ],
-          config: {
+          config: { // CHANGED: config → generationConfig
             maxOutputTokens: config.MAX_AI_RESPONSE_TOKENS || 800,
             temperature: 0.7
           }
@@ -685,6 +715,178 @@ if (!shouldForceResponse) {
       logger.error('Error generating AI response', error as Error, { messagePreview: message.substring(0, 50) });
       return null;
     }
+  }
+
+  /**
+   * Check if the current message appears to be part of a user-to-user conversation
+   * rather than directed at the bot
+   */
+  private isUserToUserConversation(
+    message: string,
+    recentMessages: Array<{text: string, username: string, isBot: boolean}> = []
+  ): boolean {
+    const messageLower = message.toLowerCase().trim();
+    
+    // 1. Check for direct indicators in the current message
+    const userToUserPhrases = [
+      'not you', 'talking to', 'asking', 'told you', 
+      'said to you', 'tell him', 'tell her', 'ask him', 'ask her',
+      'dm', 'direct message', 'check dm', 'mate', 'buddy', 'bro',
+      'how are you', "what's up", 'how you doing', "how's it going",
+      'i didnt ask', "didn't ask", 'i wasn\'t talking to you',
+      'wasnt talking to you', "wasn't asking you"
+    ];
+    
+    if (userToUserPhrases.some(phrase => messageLower.includes(phrase))) {
+      return true;
+    }
+    
+    // 2. Check for conversational patterns
+    if (recentMessages && recentMessages.length >= 2) {
+      const sameUserTalking = recentMessages
+        .filter(msg => !msg.isBot)
+        .filter(msg => msg.username === recentMessages[0].username)
+        .length >= 2;
+        
+      // If same user is talking repeatedly and not addressing the bot specifically
+      if (sameUserTalking && message.length < 50 && !messageLower.includes('bot')) {
+        return true;
+      }
+      
+      // Check if there's an active conversation between multiple users
+      const uniqueHumanUsers = new Set(
+        recentMessages
+          .filter(msg => !msg.isBot)
+          .map(msg => msg.username)
+      ).size;
+      
+      if (uniqueHumanUsers >= 2) {
+        return true;
+      }
+    }
+    
+    return false;
+  }
+
+  /**
+   * Check if message is a simple acknowledgment to the bot
+   */
+  private isAcknowledgmentToBot(
+    message: string,
+    recentMessages: Array<{text: string, username: string, isBot: boolean}> = []
+  ): boolean {
+    const messageLower = message.toLowerCase().trim();
+    
+    // Comprehensive list of acknowledgment phrases
+    const acknowledgments = [
+      'ok', 'okay', 'k', 'got it', 'thanks', 'thx', 'thank you', 'ty', 
+      'alright', 'sure', 'yep', 'yeah', 'yes', 'kk', 'cool', 'good', 
+      'great', 'awesome', 'perfect', 'nice', 'fine', 'sounds good',
+      'that works', 'understood', 'bet', 'noted', 'nah', 'right',
+      'i see', 'got that', 'for sure', 'indeed', 'understood', 
+      'makes sense', 'appreciate it', 'will do', 'gotcha',
+      'nothing', 'no', 'nope', 'not now'
+    ];
+    
+    // Check if message is just an acknowledgment or dismissal
+    const isSimpleAcknowledgment = 
+      acknowledgments.includes(messageLower) ||
+      acknowledgments.some(ack => 
+        messageLower === ack || 
+        messageLower.startsWith(ack + ' ') || 
+        messageLower.endsWith(' ' + ack) ||
+        messageLower === ack + '!' ||
+        messageLower.includes(ack)
+      ) && message.length < 30;
+  
+    // Always treat short responses after bot messages as acknowledgments
+    if (recentMessages && recentMessages.length > 0 && recentMessages[0].isBot) {
+      // If previous message was from bot and this is a short message (< 20 chars)
+      if (message.length < 20) {
+        return true;
+      }
+    }
+    
+    return isSimpleAcknowledgment;
+  }
+
+  /**
+   * Check if message is directed at another user (not the bot)
+   * This is a critical function to prevent the bot from interrupting conversations
+   */
+  private isMessageTaggingAnotherUser(
+    message: string, 
+    botUsername: string | null = null
+  ): boolean {
+    // Get the bot username from config or use fallback
+    const actualBotUsername = botUsername || 
+                         process.env.BOT_USERNAME ||
+                         'anirbanbots-agent';
+                         
+    // Normalize bot username (remove @ and convert to lowercase)
+    const normalizedBotUsername = actualBotUsername.toLowerCase().replace(/^@/, '');
+    
+    // Pattern to find @ mentions in the message
+    const tagPattern = /@(\w+)/g;
+    const mentions = [];
+    let match;
+    
+    // Extract all mentions from the message
+    while ((match = tagPattern.exec(message)) !== null) {
+      mentions.push(match[1].toLowerCase());
+    }
+    
+    // If no mentions, this isn't directed at anyone specific
+    if (mentions.length === 0) {
+      return false;
+    }
+    
+    // Check if any mention is the bot
+    const botMentioned = mentions.some(mention => 
+      mention.toLowerCase() === normalizedBotUsername
+    );
+    
+    // Log the detection for debugging
+    console.log(`🔍 Tag detection: message="${message}", mentions=${JSON.stringify(mentions)}, botUsername=${normalizedBotUsername}, botMentioned=${botMentioned}`);
+    
+    // If there are mentions but none are the bot, then the message is for someone else
+    return mentions.length > 0 && !botMentioned;
+  }
+
+  // Message history management
+  private messageHistory = new Map<string, Array<{text: string, username: string, isBot: boolean}>>();
+  private readonly MAX_HISTORY_SIZE = 5; // Keep track of last 5 messages per feed
+
+  private addToMessageHistory(feedId: string, message: {text: string, username: string, isBot: boolean}) {
+    if (!this.messageHistory.has(feedId)) {
+      this.messageHistory.set(feedId, []);
+    }
+    
+    const history = this.messageHistory.get(feedId)!;
+    history.unshift(message); // Add to beginning
+    
+    // Keep history at reasonable size
+    if (history.length > this.MAX_HISTORY_SIZE) {
+      history.pop(); // Remove oldest
+    }
+  }
+
+  /**
+   * Track a message for conversation context
+   */
+  trackMessage(feedId: string, message: string, username: string, isBot: boolean): void {
+    this.addToMessageHistory(feedId, {
+      text: message,
+      username,
+      isBot
+    });
+  }
+
+  /**
+   * Get recent message history for a feed
+   */
+  getRecentMessages(feedId: string): Array<{text: string, username: string, isBot: boolean}> {
+    return this.messageHistory.get(feedId) || [];
   }
 }
 

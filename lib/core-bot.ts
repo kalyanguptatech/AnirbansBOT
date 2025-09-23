@@ -248,6 +248,9 @@ class BotCoordinator {
   private readonly MAX_RETRY_DELAY = 5000;
   private retryCount = new Map<string, number>();
 
+  private messageHistory = new Map<string, Array<{text: string, username: string, isBot: boolean}>>();
+  private readonly MAX_HISTORY_SIZE = 5; // Keep track of last 5 messages per feed
+
   constructor() {
     // Set up callback to process pending messages when mappings arrive
     dataManager.setExperienceMappedCallback((experienceId: string) => {
@@ -355,6 +358,20 @@ class BotCoordinator {
       setTimeout(() => {
         this.processingMessages.delete(messageKey);
       }, 5000);
+    }
+  }
+
+  private addToMessageHistory(feedId: string, message: {text: string, username: string, isBot: boolean}) {
+    if (!this.messageHistory.has(feedId)) {
+      this.messageHistory.set(feedId, []);
+    }
+    
+    const history = this.messageHistory.get(feedId)!;
+    history.unshift(message); // Add to beginning
+    
+    // Keep history at reasonable size
+    if (history.length > this.MAX_HISTORY_SIZE) {
+      history.pop(); // Remove oldest
     }
   }
 
@@ -476,58 +493,52 @@ class BotCoordinator {
       // Determine if bot should respond (mentioned OR replying to bot message OR normal question detection)
       const shouldForceResponse = isMentioned || shouldForceResponseForReply;
       
+      // Add message to history
+      this.addToMessageHistory(message.feedId, {
+        text: message.content, 
+        username: message.user.username || message.user.name || 'Unknown', 
+        isBot: false
+      });
+      
+      // Get recent history for this feed
+      const recentMessages = this.messageHistory.get(message.feedId) || [];
+      
       const aiResponse = await aiEngine.analyzeQuestion(
-        message.content, 
-        settings.knowledgeBase || '', 
-        settings, 
+        message.content,
+        settings.knowledgeBase || '',
+        settings,
         companyId,
         shouldForceResponse,
-        username // Pass username for mentions
+        username,
+        recentMessages.slice(1) // Skip the current message which is already in history
       );
       
+      // If there's a response, add it to history
       if (aiResponse) {
-        const botMessage = `🤖 ${aiResponse}`;
-        const messageId = await whopAPI.sendMessageWithRetry(message.feedId, botMessage);
+        // Send message to Whop
+        const messageId = await whopAPI.sendMessageWithRetry(message.feedId, aiResponse);
+        
         if (messageId) {
-          // Track the bot message ID for reply detection
+          // Track the message as a bot message
           dataManager.trackBotMessage(messageId);
           
-          // Add bot response to context window
-          dataManager.addMessageToContext(companyId, aiResponse, 'AI Support', true);
-          
-          logger.info('AI response sent successfully', {
-            companyId,
-            username,
-            responseLength: aiResponse.length,
-            wasMentioned: isMentioned,
-            wasReplyingToBotMessage: isReplyingToBotMessage,
-            shouldForceResponseForReply,
-            botMessageId: messageId,
-            action: 'ai_response_sent',
+          // Add to history
+          this.addToMessageHistory(message.feedId, {
+            text: aiResponse,
+            username: 'Bot',
+            isBot: true
           });
-        } else {
-          logger.error('Failed to send AI response', undefined, {
-            companyId,
+          
+          // Log the response
+          logger.info('Bot response sent', {
             username,
-            wasMentioned: isMentioned,
-            wasReplyingToBotMessage: isReplyingToBotMessage,
-            shouldForceResponseForReply,
-            action: 'ai_response_failed',
+            companyId,
+            action: 'bot_response'
           });
         }
-      } else {
-        // Bot was mentioned/replied to but AI decided not to respond - this is correct behavior
-        logger.debug('Bot was mentioned but AI decided not to respond (no suitable answer)', {
-          companyId,
-          username,
-          messagePreview: message.content.substring(0, 50),
-          wasMentioned: isMentioned,
-          wasReplyingToBotMessage: isReplyingToBotMessage,
-          shouldForceResponseForReply,
-          action: 'mentioned_but_no_response',
-        });
       }
-      return;
+      
+      // Rest of your existing code...
     } else {
       // Bot is not properly configured - add detailed logging
       logger.debug('Bot not configured to respond', {
