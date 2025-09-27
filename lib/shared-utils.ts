@@ -249,7 +249,7 @@ function loadConfig(): AppConfig {
       
       // Gemini API
       GEMINI_API_KEY: getRequiredEnv('GEMINI_API_KEY'),
-      GEMINI_MODEL: getOptionalEnv('GEMINI_MODEL', 'gemini-2.0-flash-exp'),
+      GEMINI_MODEL: getOptionalEnv('GEMINI_MODEL', 'gemini-2.0-flash'),
       
       // Rate Limiting
       AI_RATE_LIMIT_PER_MINUTE: parseEnvInt('AI_RATE_LIMIT_PER_MINUTE', 10),

@@ -575,7 +575,7 @@ export class AIEngine {
         ttlMs: this.CACHE_TTL_MS
       },
       rateLimiter: this.rateLimiter.getStats(),
-      model: config.GEMINI_MODEL || "gemini-2.5-flash",
+      model: config.GEMINI_MODEL || "gemini-2.0-flash",
       rateLimitPerMinute: config.AI_RATE_LIMIT_PER_MINUTE
     };
   }
@@ -587,7 +587,7 @@ export class AIEngine {
   try {
     const response = await retry(async () => {
       const result = await this.ai.models.generateContent({
-        model: config.GEMINI_MODEL || "gemini-2.5-flash",
+        model: config.GEMINI_MODEL || "gemini-2.0-flash",
         contents: [
           createQuestionAnalysisPrompt(),
           message
@@ -639,7 +639,7 @@ export class AIEngine {
       const response = await retry(async () => {
         // Using Gemini syntax - note the change from "system" to "user" for the system prompt
         const result = await this.ai.models.generateContent({
-          model: config.GEMINI_MODEL || "gemini-2.5-flash",
+          model: config.GEMINI_MODEL || "gemini-2.0-flash",
           contents: [
             {
               role: "user", // CHANGED: system → user
