@@ -683,6 +683,7 @@ export const dataManager = new DataManager();
 process.on('SIGINT', async () => {
   // await dataManager.disconnect();
   console.log('Received SIGINT, shutting down gracefully...');
+  process.exit(0);
 });
 
 process.on('SIGTERM', async () => {

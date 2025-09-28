@@ -42,6 +42,7 @@ import { dataManager } from './data-manager';
 import { aiEngine } from './ai-engine';
 import { whopAPI } from './api-services';
 import { logger } from './shared-utils';
+import { WhopServerSdk } from "@whop/api";
 
 const WHOP_API_KEY = process.env.WHOP_API_KEY;
 const WHOP_AGENT_USER_ID = process.env.WHOP_AGENT_USER_ID;
@@ -375,6 +376,83 @@ class BotCoordinator {
     }
   }
 
+  /**
+   * Fetch announcements from the forum experience
+   */
+  private async fetchAnnouncements(experienceId: string): Promise<string> {
+    try {
+      const whopSdk = WhopServerSdk({
+        appId: 'app_1fjbYSzKaUwexe',
+        appApiKey: '5q8elZZ8SmvWJYYEQSWZ-QKZfbXFRBBpMx-izdCgqFc',
+        onBehalfOfUserId: 'user_WRcmbDKkbMpLB',
+        companyId: 'biz_OYXRzWXqdSOH9g',
+      });
+      
+      // Fetch posts from the forum
+      const postsResult = await whopSdk.listForumPostsFromForum({
+        experienceId: experienceId,
+      });
+      
+      // Get posts from the nested structure
+      const posts = postsResult?.feedPosts?.posts || [];
+      
+      if (!posts || posts.length === 0) {
+        logger.debug('No announcements found');
+        return "";
+      }
+      
+      logger.debug(`Found ${posts.length} announcements`);
+      
+      // Format announcements for the knowledge base
+      let announcementText = "## IMPORTANT ANNOUNCEMENTS\n\n";
+      
+      posts.forEach((post, index) => {
+        // Add title (using first few words of content if no title)
+        const contentPreview = post.content.split(' ').slice(0, 5).join(' ');
+        announcementText += `### ${contentPreview}...\n`;
+        
+        // Add content
+        announcementText += `${post.content}\n\n`;
+        
+        // Add metadata
+        const date = new Date(parseInt(post.createdAt)).toLocaleDateString();
+        announcementText += `Posted by: ${post.user.name} on ${date}\n\n`;
+        
+        // Add separator between announcements
+        if (index < posts.length - 1) {
+          announcementText += "---\n\n";
+        }
+      });
+      
+      return announcementText;
+    } catch (error) {
+      logger.error('Error fetching announcements', error as Error);
+      return "";
+    }
+  }
+
+  /**
+   * Augment knowledge base with announcements
+   */
+  private async augmentKnowledgeBase(knowledgeBase: string): Promise<string> {
+    const announceExperienceId = "exp_7Q01flmyfDx3FT";
+    console.log(`🔍 DEBUG: Fetching announcements from experience ${announceExperienceId}`);
+    
+    const announcementContent = await this.fetchAnnouncements(announceExperienceId);
+    
+    console.log(`🔍 DEBUG: Announcement content length: ${announcementContent.length}`);
+    console.log(`🔍 DEBUG: Announcement preview: ${announcementContent.substring(0, 100)}...`);
+    
+    if (announcementContent) {
+      const combined = `${knowledgeBase}\n\n${announcementContent}`;
+      console.log(`🔍 DEBUG: Combined knowledge base length: ${combined.length}`);
+      return combined;
+    }
+    
+    console.log(`🔍 DEBUG: No announcement content found, using original knowledge base`);
+    return knowledgeBase;
+  }
+
   private async processMessageInternal(message: ProcessedMessage): Promise<void> {
     const experienceId = message.experienceId;
     let companyId = dataManager.getCompanyId(experienceId);
@@ -503,14 +581,18 @@ class BotCoordinator {
       // Get recent history for this feed
       const recentMessages = this.messageHistory.get(message.feedId) || [];
       
+      // Augment knowledge base with announcements before passing to AI
+      const augmentedKnowledgeBase = await this.augmentKnowledgeBase(settings.knowledgeBase || '');
+      
+      // Use augmented knowledge base
       const aiResponse = await aiEngine.analyzeQuestion(
         message.content,
-        settings.knowledgeBase || '',
+        augmentedKnowledgeBase,
         settings,
         companyId,
         shouldForceResponse,
         username,
-        recentMessages.slice(1) // Skip the current message which is already in history
+        recentMessages
       );
       
       // If there's a response, add it to history
