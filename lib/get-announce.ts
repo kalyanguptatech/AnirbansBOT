@@ -78,8 +78,8 @@ async function fetchAnnouncements(experienceId: string) {
     console.error("Error fetching announcements:", error);
     
     // Check if it's a known error type
-    if (error.response) {
-      console.error("API Error Response:", JSON.stringify(error.response.data || {}, null, 2));
+    if (error && typeof error === 'object' && 'response' in error) {
+      console.error("API Error Response:", JSON.stringify((error as any).response.data || {}, null, 2));
     }
     
     return null;
